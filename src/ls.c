@@ -1,6 +1,9 @@
+#define _GNU_SOURCE
+#define _XOPEN_SOURCE 700
+#include <strings.h>
 /* src/ls.c
-   v1.5.0 - ls with -l, -x, -R, alphabetical sort (qsort) and colorized output.
-   Color rules (Feature-6):
+   v1.5.0 - ls with -a, -l, -x, -R, alphabetical sort (qsort) and colorized output.
+   Color rules:
      Directory -> Blue
      Executable -> Green
      Tarballs (.tar, .gz, .zip, .tgz, .bz2, .xz) -> Red
@@ -8,14 +11,11 @@
      Special files (device, socket, fifo) -> Reverse video
    Colors disabled automatically if stdout is not a TTY.
 */
-#define _GNU_SOURCE
-#define _XOPEN_SOURCE 700
-#include <strings.h>
-
 #define _POSIX_C_SOURCE 200809L
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>   // for strcasecmp
 #include <unistd.h>
 #include <dirent.h>
 #include <sys/stat.h>
@@ -40,9 +40,10 @@
 #define CLR_REVERSE  "\x1b[7m"
 
 /* flags */
-static int flag_long = 0;
-static int flag_across = 0;
-static int flag_recursive = 0;
+static int flag_all = 0;       // -a
+static int flag_long = 0;      // -l
+static int flag_across = 0;    // -x
+static int flag_recursive = 0; // -R
 static int use_color = 1;
 
 /* comparator for qsort */
@@ -83,12 +84,11 @@ static void format_mode(mode_t m, char *out) {
     if (m & S_ISVTX) out[9] = (out[9]=='x') ? 't' : 'T';
 }
 
-/* helper: check common archive extensions (tarballs) */
+/* helper: check archive extensions */
 static int is_tarball(const char *name) {
     if (!name) return 0;
     const char *ext = strrchr(name, '.');
     if (!ext) return 0;
-    /* check multiple common compressed/archive extensions */
     if (strcasecmp(ext, ".tar") == 0) return 1;
     if (strcasecmp(ext, ".gz") == 0) return 1;
     if (strcasecmp(ext, ".tgz") == 0) return 1;
@@ -98,7 +98,7 @@ static int is_tarball(const char *name) {
     return 0;
 }
 
-/* pick color based on mode and filename */
+/* pick color */
 static const char* pick_color(const char *name, mode_t mode) {
     if (!use_color) return NULL;
     if (S_ISLNK(mode)) return CLR_MAGENTA;
@@ -109,15 +109,12 @@ static const char* pick_color(const char *name, mode_t mode) {
     return NULL;
 }
 
-/* print long listing for a single entry (with color) */
+/* print long listing entry */
 static void print_long_item(const char *dir, const char *name) {
     char full[PATH_MAX];
     struct stat st;
     snprintf(full, sizeof(full), "%s/%s", dir, name);
-    if (lstat(full, &st) == -1) {
-        perror(full);
-        return;
-    }
+    if (lstat(full, &st) == -1) { perror(full); return; }
     char perms[11]; format_mode(st.st_mode, perms);
     struct passwd *pw = getpwuid(st.st_uid);
     struct group  *gr = getgrgid(st.st_gid);
@@ -126,8 +123,7 @@ static void print_long_item(const char *dir, const char *name) {
     strftime(timebuf, sizeof(timebuf), "%b %e %H:%M", mt);
     printf("%s %2lu %s %s %6lld %s ",
            perms, (unsigned long)st.st_nlink,
-           pw ? pw->pw_name : "?",
-           gr ? gr->gr_name : "?",
+           pw ? pw->pw_name : "?", gr ? gr->gr_name : "?",
            (long long)st.st_size, timebuf);
     const char *color = pick_color(name, st.st_mode);
     if (color) printf("%s", color);
@@ -141,7 +137,7 @@ static void print_long_item(const char *dir, const char *name) {
     putchar('\n');
 }
 
-/* print a padded name with color */
+/* print name padded with color */
 static void print_name_padded(const char *dir, const char *name, int width) {
     char full[PATH_MAX];
     struct stat st;
@@ -153,7 +149,7 @@ static void print_name_padded(const char *dir, const char *name, int width) {
     if (color) printf("%s", CLR_RESET);
 }
 
-/* down-then-across columns */
+/* down-then-across */
 static void print_columns_down(const char *dir, char **names, int count, int maxlen) {
     int width = term_width();
     int colw = maxlen + 2; if (colw < 1) colw = 1;
@@ -168,7 +164,7 @@ static void print_columns_down(const char *dir, char **names, int count, int max
     }
 }
 
-/* across (-x) */
+/* across -x */
 static void print_columns_across(const char *dir, char **names, int count, int maxlen) {
     int width = term_width();
     int colw = maxlen + 2; if (colw < 1) colw = 1;
@@ -181,7 +177,7 @@ static void print_columns_across(const char *dir, char **names, int count, int m
     if (cur > 0) putchar('\n');
 }
 
-/* read directory entries into array; skip hidden by default */
+/* read directory, apply -a */
 static int read_dir(const char *dir, char ***names_out, int *maxlen_out) {
     DIR *d = opendir(dir);
     if (!d) { perror(dir); return -1; }
@@ -189,7 +185,7 @@ static int read_dir(const char *dir, char ***names_out, int *maxlen_out) {
     char **names = NULL;
     int cap = 0, n = 0, maxlen = 0;
     while ((entry = readdir(d)) != NULL) {
-        if (entry->d_name[0] == '.') continue; /* skip hidden */
+        if (!flag_all && entry->d_name[0] == '.') continue; /* -a check */
         if (n + 1 > cap) {
             cap = cap ? cap * 2 : 128;
             names = realloc(names, cap * sizeof(char*));
@@ -212,7 +208,7 @@ static void free_names(char **names, int n) {
     free(names);
 }
 
-/* core listing function (recursive) */
+/* recursive listing */
 static void do_ls(const char *dir) {
     char **names = NULL;
     int maxlen = 0;
@@ -245,19 +241,19 @@ static void do_ls(const char *dir) {
 
 int main(int argc, char **argv) {
     int opt;
-    use_color = isatty(STDOUT_FILENO); /* disable colors when piped */
-    while ((opt = getopt(argc, argv, "lRx")) != -1) {
+    use_color = isatty(STDOUT_FILENO);
+    while ((opt = getopt(argc, argv, "alRx")) != -1) {
         switch (opt) {
+            case 'a': flag_all = 1; break;
             case 'l': flag_long = 1; break;
             case 'R': flag_recursive = 1; break;
             case 'x': flag_across = 1; break;
             default:
-                fprintf(stderr, "Usage: %s [-l] [-R] [-x] [path]\n", argv[0]);
+                fprintf(stderr, "Usage: %s [-a] [-l] [-R] [-x] [path]\n", argv[0]);
                 exit(EXIT_FAILURE);
         }
     }
     const char *path = (optind < argc) ? argv[optind] : ".";
-    /* if single non-directory file */
     struct stat st;
     if (lstat(path, &st) == 0 && !S_ISDIR(st.st_mode)) {
         if (flag_long) print_long_item(".", path);
